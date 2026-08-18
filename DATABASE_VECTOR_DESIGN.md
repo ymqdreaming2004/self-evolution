@@ -2,7 +2,7 @@
 
 本文档说明 `self-evolution-Agent` 当前已经实现的数据库、向量库、数据关系、读写流程，以及正式长期使用前建议补齐的设计。
 
-> Embedding 模型必须由项目所有者决定。本文出现的 `BAAI/bge-small-zh-v1.5` 仅表示当前代码默认占位，不代表最终选型。
+> 当前确定的 Embedding 模型为 `Qwen/Qwen3-Embedding-0.6B`。更换 Embedding 模型时必须创建新 Collection 并重新入库，不能与旧向量混用。
 
 ## 1. 持久化架构概览
 
@@ -135,39 +135,29 @@ card:<action_id>:<action>
 
 不建议长期维持职责重叠的两套去重逻辑。
 
-### 2.4 `inventory_items` 冰箱库存
+### 2.4 `inventory_items` 现有食材清单
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `id` | UUID string | 库存主键 |
+| `id` | UUID string | 食材记录主键 |
 | `owner_id` | string | 飞书用户 open_id |
 | `name` | string | 食材展示名称 |
 | `normalized_name` | string | 标准化食材名称 |
-| `quantity` | float | 数量 |
-| `unit` | string | 单位，默认 `件` |
-| `production_date` | date | 生产日期，可为空 |
-| `expiry_date` | date | 到期日，可为空 |
-| `date_source` | string | `printed/calculated/unknown` |
 | `image_key` | string | 来源飞书图片 key |
-| `status` | string | `active/consumed/deleted` |
+| `status` | string | `active/consumed` |
 | `model_version` | string | 视觉模型版本 |
 | `created_at` | datetime | 创建时间 |
 | `updated_at` | datetime | 更新时间 |
 
-库存采用软删除：
+为兼容已有 SQLite 文件，ORM 暂时保留旧版数量和日期物理列并写入安全默认值；
+精简版冰箱 Agent 不读取、展示或更新这些兼容列，新业务只使用上表字段。
 
-- `active`：当前有效库存。
-- `consumed`：已经消耗。
-- `deleted`：用户删除。
+食材清单采用状态变更而不是物理删除：
 
-当前临期查询条件：
+- `active`：当前已有。
+- `consumed`：已经用完。
 
-```text
-owner_id = 当前用户
-status = active
-expiry_date 不为空
-expiry_date <= 今天 + 3 天
-```
+同一个用户的同名有效食材在确认时合并，避免维护数量和批次。
 
 当前设计保留 `owner_id`，虽然第一版是单用户，但未来可以扩展到多用户数据隔离。
 
@@ -337,7 +327,7 @@ CHROMA_PATH=./data/chroma
 当前 Collection：
 
 ```text
-personal_knowledge
+personal_knowledge_qwen_qwen3_embedding_0_6b
 ```
 
 当前距离空间：
@@ -418,6 +408,7 @@ flowchart LR
 | `title` | 知识标题 |
 | `tags` | 逗号分隔标签 |
 | `source` | 飞书 message_id 或网页 URL |
+| `note_link` | 对应 Obsidian Markdown 文件的 `obsidian://` URI |
 | `created_at` | ISO 时间字符串 |
 | `created_ts` | 数值时间戳 |
 
@@ -444,12 +435,12 @@ EMBEDDING_MODEL=
 当前代码默认占位：
 
 ```env
-EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
+EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B
 ```
 
 最终模型必须由项目所有者决定。
 
-如果最终选择远程 Embedding API，需要增加独立的 Embedding Provider，目前代码只实现了本地 `SentenceTransformer`。
+如果未来选择远程 Embedding API，需要增加独立的 Embedding Provider；当前代码使用本地 `SentenceTransformer` 加载 Qwen3-Embedding-0.6B。
 
 ### 4.6 查询流程
 

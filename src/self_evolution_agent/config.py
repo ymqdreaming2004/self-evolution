@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     data_dir: Path = Path("./data")
     database_url: str = "sqlite+aiosqlite:///./data/self_evolution.db"
     chroma_path: Path = Path("./data/chroma")
+    obsidian_vault_path: Path = Path("./data/obsidian-vault")
 
     feishu_app_id: str = ""
     feishu_app_secret: str = ""
@@ -34,11 +35,12 @@ class Settings(BaseSettings):
     planner_base_url: str = ""
     planner_api_key: str = ""
     planner_model: str = ""
-    embedding_model: str = "BAAI/bge-small-zh-v1.5"
+    embedding_model: str = "Qwen/Qwen3-Embedding-0.6B"
 
     vision_base_url: str = "http://vision:8001"
-    vision_model_name: str = "Qwen/Qwen2.5-VL-3B-Instruct"
-    vision_model_version: str = "qwen2.5-vl-3b-4bit-v1"
+    vision_model_name: str = "Qwen/Qwen3.5-2B"
+    vision_adapter_path: str = ""
+    vision_model_version: str = "qwen3.5-2b-fridge-qlora-v1"
     vision_max_image_bytes: int = 10 * 1024 * 1024
 
     worker_poll_seconds: float = 1.0
@@ -60,6 +62,7 @@ class Settings(BaseSettings):
     def ensure_directories(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.chroma_path.mkdir(parents=True, exist_ok=True)
+        self.obsidian_vault_path.mkdir(parents=True, exist_ok=True)
         (self.data_dir / "images").mkdir(parents=True, exist_ok=True)
         (self.data_dir / "training").mkdir(parents=True, exist_ok=True)
 

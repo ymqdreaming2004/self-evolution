@@ -42,10 +42,12 @@ dev = [
 vision = [
   "accelerate>=1.3,<2",
   "bitsandbytes>=0.45,<1",
+  "peft>=0.18,<1",
   "pillow>=11,<12",
   "qwen-vl-utils>=0.0.10,<1",
   "torch>=2.5,<3",
-  "transformers>=4.49,<5",
+  "torchvision>=0.20,<1",
+  "transformers>=5.8,<6",
 ]
 train = [
   "datasets>=3.2,<5",

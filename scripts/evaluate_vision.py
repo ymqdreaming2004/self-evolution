@@ -15,17 +15,8 @@ def normalized_names(value: dict[str, Any]) -> set[str]:
     }
 
 
-def date_map(value: dict[str, Any]) -> dict[str, str | None]:
-    return {
-        str(item.get("normalized_name") or item.get("name", "")).strip().lower(): item.get(
-            "expiry_date"
-        )
-        for item in value.get("items", [])
-    }
-
-
 def evaluate(path: Path) -> dict[str, float | int]:
-    total = strict_json = name_correct = date_correct = full_correct = 0
+    total = strict_json = exact_samples = true_positive = false_positive = false_negative = 0
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
@@ -40,18 +31,23 @@ def evaluate(path: Path) -> dict[str, float | int]:
             continue
         target_names = normalized_names(target)
         predicted_names = normalized_names(parsed)
-        names_match = target_names == predicted_names
-        dates_match = date_map(target) == date_map(parsed)
-        name_correct += int(names_match)
-        date_correct += int(dates_match)
-        full_correct += int(names_match and dates_match)
+        exact_samples += int(target_names == predicted_names)
+        true_positive += len(target_names & predicted_names)
+        false_positive += len(predicted_names - target_names)
+        false_negative += len(target_names - predicted_names)
     denominator = max(total, 1)
+    precision_denominator = true_positive + false_positive
+    recall_denominator = true_positive + false_negative
+    precision = true_positive / precision_denominator if precision_denominator else 1.0
+    recall = true_positive / recall_denominator if recall_denominator else 1.0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
     return {
         "samples": total,
         "strict_json_rate": strict_json / denominator,
-        "ingredient_name_accuracy": name_correct / denominator,
-        "expiry_date_accuracy": date_correct / denominator,
-        "full_sample_accuracy": full_correct / denominator,
+        "ingredient_precision": precision,
+        "ingredient_recall": recall,
+        "ingredient_f1": f1,
+        "exact_sample_accuracy": exact_samples / denominator,
     }
 
 

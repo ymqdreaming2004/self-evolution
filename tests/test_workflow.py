@@ -23,12 +23,6 @@ class FakePlanner:
                     intent=Intent.INSPIRATION,
                     instruction=message.text,
                 ),
-                PlannedTask(
-                    id="fallback",
-                    kind=TaskKind.PLACEHOLDER,
-                    intent=Intent.PLACEHOLDER,
-                    instruction=message.text,
-                ),
             ],
         )
 
@@ -44,7 +38,7 @@ class FakeAgent:
             effects.append(
                 AgentEffect(
                     type="inventory_mutation",
-                    payload={"action": "consume", "item_id": "item-1"},
+                    payload={"action": "consume", "item_name": "牛奶"},
                     idempotency_key="confirm-1",
                     requires_confirmation=True,
                 )
@@ -90,14 +84,13 @@ async def test_graph_parallel_dispatch_and_aggregate() -> None:
         planner=FakePlanner(),
         inspiration=FakeAgent("idea"),
         fridge=FakeAgent("fridge"),
-        placeholder=FakeAgent("fallback"),
+        general=FakeAgent("general"),
         effects=effects,
         checkpointer=MemorySaver(),
     )
     result = await workflow.invoke_message(incoming(), "m1")
-    assert {item["task_id"] for item in result["results"]} == {"idea", "fallback"}
+    assert {item["task_id"] for item in result["results"]} == {"idea"}
     assert "idea" in result["reply"]
-    assert "fallback" in result["reply"]
 
 
 async def test_graph_interrupt_and_resume() -> None:
@@ -108,7 +101,7 @@ async def test_graph_interrupt_and_resume() -> None:
         planner=planner,
         inspiration=FakeAgent("idea", confirmation=True),
         fridge=FakeAgent("fridge"),
-        placeholder=FakeAgent("fallback"),
+        general=FakeAgent("general"),
         effects=effects,
         checkpointer=MemorySaver(),
     )
@@ -120,6 +113,34 @@ async def test_graph_interrupt_and_resume() -> None:
     )
     assert resumed["confirmation_result"] == "confirmed:a1"
     assert effects.feishu.messages[-1] == ("u1", "confirmed:a1")
+
+
+async def test_graph_dispatches_general_chat_to_general_agent() -> None:
+    class GeneralPlanner:
+        async def plan(self, message):
+            return ExecutionPlan(
+                intent=Intent.GENERAL_CHAT,
+                tasks=[
+                    PlannedTask(
+                        id="general",
+                        kind=TaskKind.GENERAL,
+                        intent=Intent.GENERAL_CHAT,
+                        instruction=message.text,
+                    )
+                ],
+            )
+
+    workflow = AgentWorkflow(
+        planner=GeneralPlanner(),
+        inspiration=FakeAgent("idea"),
+        fridge=FakeAgent("fridge"),
+        general=FakeAgent("general reply"),
+        effects=FakeEffects(),
+        checkpointer=MemorySaver(),
+    )
+    result = await workflow.invoke_message(incoming(), "general-thread")
+    assert result["results"][0]["intent"] == Intent.GENERAL_CHAT
+    assert result["reply"] == "general reply"
 
 
 async def _confirmation_plan(message):

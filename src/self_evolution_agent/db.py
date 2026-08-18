@@ -59,6 +59,8 @@ class InventoryItem(Base, TimestampMixin):
     owner_id: Mapped[str] = mapped_column(String(128), index=True)
     name: Mapped[str] = mapped_column(String(255))
     normalized_name: Mapped[str] = mapped_column(String(255), index=True)
+    # Legacy storage columns remain mapped so existing SQLite databases can accept new rows.
+    # The simplified Fridge Agent does not read, expose or update them.
     quantity: Mapped[float] = mapped_column(Float, default=1)
     unit: Mapped[str] = mapped_column(String(32), default="件")
     production_date: Mapped[Any | None] = mapped_column(Date, nullable=True)

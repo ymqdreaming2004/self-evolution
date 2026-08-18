@@ -8,7 +8,7 @@ from pathlib import Path
 import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from .agents import FridgeAgent, InspirationAgent, PlaceholderAgent
+from .agents import FridgeAgent, GeneralChatAgent, InspirationAgent
 from .config import get_settings
 from .db import Database, recover_stale_jobs
 from .effects import EffectExecutor
@@ -16,6 +16,7 @@ from .long_connection import FeishuLongConnection
 from .planner import Planner
 from .providers.chat import ChatProvider
 from .providers.feishu import FeishuClient
+from .providers.obsidian import ObsidianVault
 from .providers.vision import VisionProvider
 from .providers.web import WebContentFetcher
 from .rag import KnowledgeStore
@@ -54,9 +55,14 @@ class Worker:
         store = KnowledgeStore(self.settings)
         self.workflow = AgentWorkflow(
             planner=Planner(chat),
-            inspiration=InspirationAgent(chat=chat, store=store, web=self.web),
+            inspiration=InspirationAgent(
+                chat=chat,
+                store=store,
+                web=self.web,
+                vault=ObsidianVault(self.settings.obsidian_vault_path),
+            ),
             fridge=FridgeAgent(chat=chat, vision=self.vision, sessions=self.database.sessions),
-            placeholder=PlaceholderAgent(self.database.sessions),
+            general=GeneralChatAgent(chat),
             effects=EffectExecutor(feishu=self.feishu, sessions=self.database.sessions),
             checkpointer=checkpointer,
         )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, timedelta
+from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -119,15 +119,29 @@ class InventoryRepository:
         model_version: str | None,
         commit: bool = True,
     ) -> InventoryItem:
+        existing = await self.session.scalar(
+            select(InventoryItem).where(
+                InventoryItem.owner_id == owner_id,
+                InventoryItem.normalized_name == (
+                    prediction.normalized_name or prediction.name.lower()
+                ),
+                InventoryItem.status == "active",
+            )
+        )
+        if existing is not None:
+            existing.name = prediction.name
+            existing.image_key = image_key or existing.image_key
+            existing.model_version = model_version or existing.model_version
+            if commit:
+                await self.session.commit()
+                await self.session.refresh(existing)
+            else:
+                await self.session.flush()
+            return existing
         item = InventoryItem(
             owner_id=owner_id,
             name=prediction.name,
             normalized_name=prediction.normalized_name or prediction.name.lower(),
-            quantity=prediction.quantity,
-            unit=prediction.unit,
-            production_date=prediction.production_date,
-            expiry_date=prediction.expiry_date,
-            date_source=prediction.date_source,
             image_key=image_key,
             model_version=model_version,
         )
@@ -143,49 +157,29 @@ class InventoryRepository:
         result = await self.session.execute(
             select(InventoryItem)
             .where(InventoryItem.owner_id == owner_id, InventoryItem.status == "active")
-            .order_by(InventoryItem.expiry_date.asc().nulls_last(), InventoryItem.created_at)
+            .order_by(InventoryItem.name, InventoryItem.created_at)
         )
         return list(result.scalars())
-
-    async def list_expiring(self, owner_id: str, within_days: int = 3) -> list[InventoryItem]:
-        end = date.today() + timedelta(days=within_days)
-        result = await self.session.execute(
-            select(InventoryItem)
-            .where(
-                InventoryItem.owner_id == owner_id,
-                InventoryItem.status == "active",
-                InventoryItem.expiry_date.is_not(None),
-                InventoryItem.expiry_date <= end,
-            )
-            .order_by(InventoryItem.expiry_date)
-        )
-        return list(result.scalars())
-
-    async def get(self, owner_id: str, item_id: str) -> InventoryItem | None:
-        return await self.session.scalar(
-            select(InventoryItem).where(
-                InventoryItem.id == item_id, InventoryItem.owner_id == owner_id
-            )
-        )
-
-    async def update(self, item: InventoryItem, values: dict[str, Any]) -> InventoryItem:
-        allowed = {"name", "normalized_name", "quantity", "unit", "production_date", "expiry_date"}
-        for key, value in values.items():
-            if key in allowed:
-                setattr(item, key, value)
-        await self.session.commit()
-        await self.session.refresh(item)
-        return item
 
     async def consume(self, item: InventoryItem) -> InventoryItem:
         item.status = "consumed"
         await self.session.commit()
         return item
 
-    async def delete(self, item: InventoryItem) -> InventoryItem:
-        item.status = "deleted"
-        await self.session.commit()
-        return item
+    async def find_active_by_name(self, owner_id: str, item_name: str) -> InventoryItem | None:
+        normalized = item_name.strip().lower()
+        return await self.session.scalar(
+            select(InventoryItem)
+            .where(
+                InventoryItem.owner_id == owner_id,
+                InventoryItem.status == "active",
+                (
+                    (InventoryItem.normalized_name == normalized)
+                    | (InventoryItem.name == item_name.strip())
+                ),
+            )
+            .order_by(InventoryItem.created_at.desc())
+        )
 
 
 class DraftRepository:

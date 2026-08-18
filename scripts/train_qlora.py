@@ -5,8 +5,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-SYSTEM_PROMPT = """识别食材名称、数量、单位、生产日期、保质期和到期日。
-只输出符合 VisionResult schema 的 JSON；看不清的日期必须为 null，禁止推测。"""
+SYSTEM_PROMPT = """识别图片中所有可以可靠确认的食材。
+只输出符合 VisionResult schema 的 JSON，字段只包含 name、normalized_name 和 confidence。
+不要识别日期、数量、包装规格或非食材；无法确认的物体不要猜测。"""
 
 
 def main() -> None:

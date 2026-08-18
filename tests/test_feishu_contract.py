@@ -59,13 +59,13 @@ def test_parse_card_form_values() -> None:
             "operator": {"operator_id": {"open_id": "ou_1"}},
             "action": {
                 "value": {"action_id": "a1", "thread_id": "t1", "action": "confirm"},
-                "form_value": {"expiry_0": "2026-08-01"},
+                "form_value": {"name_0": "纯牛奶"},
             },
         }
     }
     action, open_id = parse_card_action(payload)
     assert open_id == "ou_1"
-    assert action.values["expiry_0"] == "2026-08-01"
+    assert action.values["name_0"] == "纯牛奶"
 
 
 def test_confirmation_card_contains_editable_fields() -> None:
@@ -73,9 +73,15 @@ def test_confirmation_card_contains_editable_fields() -> None:
         items=[IngredientPrediction(name="牛奶", confidence=0.9)], model_version="v1"
     )
     card = fridge_confirmation_card(action_id="a1", thread_id="t1", draft_id="d1", result=result)
-    form = card["elements"][1]
+    assert card["schema"] == "2.0"
+    form = card["body"]["elements"][1]
     assert form["tag"] == "form"
-    assert any(item.get("name") == "expiry_0" for item in form["elements"])
+    names = [item.get("name") for item in form["elements"]]
+    assert "name_0" in names
+    submit = next(item for item in form["elements"] if item.get("tag") == "button")
+    assert submit["form_action_type"] == "submit"
+    assert not any(name and name.startswith("expiry_") for name in names)
+    assert not any(name and name.startswith("quantity_") for name in names)
 
 
 def test_feishu_signature_verification() -> None:

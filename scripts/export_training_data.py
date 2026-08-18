@@ -10,6 +10,7 @@ from sqlalchemy import select
 from self_evolution_agent.config import get_settings
 from self_evolution_agent.db import Database, RecognitionDraft
 from self_evolution_agent.repositories import load_json
+from self_evolution_agent.schemas import VisionResult
 
 
 async def export(output: Path) -> int:
@@ -27,12 +28,15 @@ async def export(output: Path) -> int:
             )
         )
         for draft in result.scalars():
+            corrected = VisionResult.model_validate(load_json(draft.corrected_json or "{}"))
             row = {
                 "sample_id": draft.id,
                 "image_path": draft.image_path,
                 "model_version": draft.model_version,
                 "prediction": load_json(draft.prediction_json),
-                "target": load_json(draft.corrected_json or "{}"),
+                "target": {
+                    "items": [item.model_dump(mode="json") for item in corrected.items]
+                },
             }
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
             count += 1

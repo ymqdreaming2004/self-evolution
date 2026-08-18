@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import date
 from typing import Any
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -124,26 +123,20 @@ class EffectExecutor:
         self, session: Any, payload: dict[str, Any], values: dict[str, Any], open_id: str
     ) -> str:
         result = VisionResult.model_validate(payload["result"])
+        confirmed_items = []
         for index, item in enumerate(result.items):
-            expiry_value = values.get(f"expiry_{index}")
-            quantity_value = values.get(f"quantity_{index}")
-            name_value = values.get(f"name_{index}")
-            if name_value:
-                item.name = str(name_value).strip()
-                item.normalized_name = item.name.lower()
-            if quantity_value:
-                item.quantity = float(quantity_value)
-            if expiry_value:
-                if str(expiry_value).strip().lower() in {"unknown", "未知"}:
-                    item.expiry_date = None
-                    item.date_source = "unknown"
-                else:
-                    item.expiry_date = date.fromisoformat(str(expiry_value).strip())
-            if item.expiry_date is None and str(expiry_value).strip().lower() not in {
-                "unknown",
-                "未知",
-            }:
-                raise ValueError(f"{item.name} 缺少到期日；如确实未知请填写 unknown")
+            raw_name = values.get(f"name_{index}", item.name)
+            name_value = "" if raw_name is None else str(raw_name).strip()
+            if not name_value:
+                continue
+            original_name = item.name
+            item.name = name_value
+            if name_value != original_name:
+                item.normalized_name = name_value.lower()
+            confirmed_items.append(item)
+        if not confirmed_items:
+            raise ValueError("至少保留一种食材；不需要录入时请选择取消")
+        result.items = confirmed_items
         drafts = DraftRepository(session)
         draft = await drafts.get(payload["draft_id"], open_id)
         if draft is None or draft.status != "pending":
@@ -158,40 +151,33 @@ class EffectExecutor:
                 commit=False,
             )
         await drafts.confirm(draft, result)
-        return f"已将 {len(result.items)} 种食材写入库存。"
+        names = "、".join(item.name for item in result.items)
+        return f"已更新现有食材：{names}。"
 
     async def _commit_mutation(self, session: Any, payload: dict[str, Any], open_id: str) -> str:
         repository = InventoryRepository(session)
-        item = await repository.get(open_id, payload["item_id"])
+        item_name = str(payload.get("item_name", "")).strip()
+        item = await repository.find_active_by_name(open_id, item_name)
         if item is None:
-            return "未找到该库存记录。"
-        action = payload["action"]
-        if action == "consume":
-            await repository.consume(item)
-            return f"已标记消耗：{item.name}。"
-        if action == "delete":
-            await repository.delete(item)
-            return f"已删除：{item.name}。"
-        await repository.update(item, payload.get("values", {}))
-        return f"已更新：{item.name}。"
+            return f"现有食材中没有找到“{item_name}”。"
+        await repository.consume(item)
+        return f"已标记用完：{item.name}。"
 
 
 def mutation_confirmation_card(
     action_id: str, thread_id: str, payload: dict[str, Any]
 ) -> dict[str, Any]:
-    action_names = {"update": "修改", "consume": "消耗", "delete": "删除"}
-    action_name = action_names.get(payload.get("action"), "变更")
     value = {"action_id": action_id, "thread_id": thread_id}
     return {
         "config": {"wide_screen_mode": True},
         "header": {
             "template": "red",
-            "title": {"tag": "plain_text", "content": "确认库存操作"},
+            "title": {"tag": "plain_text", "content": "确认食材已用完"},
         },
         "elements": [
             {
                 "tag": "markdown",
-                "content": f"确认{action_name}库存记录 `{payload.get('item_id', '')}`？",
+                "content": f"确认将 **{payload.get('item_name', '')}** 标记为已用完？",
             },
             {
                 "tag": "action",
@@ -217,9 +203,6 @@ def query_card_effect(data: dict[str, Any], *, message_id: str, task_id: str) ->
     class Item:
         def __init__(self, value: dict[str, Any]):
             self.__dict__.update(value)
-            self.expiry_date = (
-                date.fromisoformat(value["expiry_date"]) if value.get("expiry_date") else None
-            )
 
     card = inventory_card([Item(item) for item in data["items"]], data["title"])
     return AgentEffect(

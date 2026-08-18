@@ -27,10 +27,11 @@ class QwenVisionRuntime:
             return
         try:
             import torch
+            from peft import PeftModel
             from transformers import (
+                AutoModelForImageTextToText,
                 AutoProcessor,
                 BitsAndBytesConfig,
-                Qwen2_5_VLForConditionalGeneration,
             )
         except ImportError as exc:
             raise RuntimeError("install the 'vision' optional dependencies") from exc
@@ -39,16 +40,29 @@ class QwenVisionRuntime:
         quantization = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_compute_dtype=torch.bfloat16,
             bnb_4bit_use_double_quant=True,
         )
-        self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        base_model = AutoModelForImageTextToText.from_pretrained(
             settings.vision_model_name,
-            torch_dtype=torch.float16,
+            dtype=torch.bfloat16,
             quantization_config=quantization,
             device_map="auto",
+            trust_remote_code=True,
         )
-        self.processor = AutoProcessor.from_pretrained(settings.vision_model_name)
+        if settings.vision_adapter_path:
+            self.model = PeftModel.from_pretrained(
+                base_model,
+                settings.vision_adapter_path,
+                is_trainable=False,
+            )
+        else:
+            self.model = base_model
+        self.model.eval()
+        self.processor = AutoProcessor.from_pretrained(
+            settings.vision_model_name,
+            trust_remote_code=True,
+        )
 
     async def recognize(self, content: bytes) -> VisionResult:
         async with self.lock:
@@ -68,11 +82,9 @@ class QwenVisionRuntime:
                     {
                         "type": "text",
                         "text": (
-                            "识别所有食材及包装日期。只输出 JSON：{items:[{name,normalized_name,"
-                            "quantity,unit,production_date,shelf_life_days,expiry_date,date_source,"
-                            "confidence,evidence_text}],model_version,raw_text}。"
-                            "日期为 YYYY-MM-DD；"
-                            "无法确认必须为 null，禁止推测。"
+                            "识别图片中所有可以可靠确认的食材。只输出 JSON："
+                            "{items:[{name,normalized_name,confidence}]}。"
+                            "不要识别日期、数量、包装规格或非食材；无法确认的物体不要猜测。"
                         ),
                     },
                 ],

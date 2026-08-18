@@ -12,6 +12,12 @@ from .config import Settings
 from .schemas import KnowledgeChunk, KnowledgeHit
 
 
+def collection_name_for_model(model_name: str) -> str:
+    """Keep embeddings from different models in separate Chroma collections."""
+    normalized = re.sub(r"[^a-zA-Z0-9]+", "_", model_name).strip("_").lower()
+    return f"personal_knowledge_{normalized}"[:512]
+
+
 def clean_text(text: str) -> str:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(r"[ \t]+", " ", text)
@@ -49,7 +55,7 @@ class KnowledgeStore:
         self._model: SentenceTransformer | None = None
         self._client = chromadb.PersistentClient(path=str(Path(settings.chroma_path)))
         self._collection = self._client.get_or_create_collection(
-            "personal_knowledge", metadata={"hnsw:space": "cosine"}
+            collection_name_for_model(settings.embedding_model), metadata={"hnsw:space": "cosine"}
         )
 
     @property
@@ -65,6 +71,7 @@ class KnowledgeStore:
         title: str,
         tags: list[str],
         source: str,
+        note_link: str = "",
         created_at: datetime,
         document_id: str | None = None,
     ) -> list[KnowledgeChunk]:
@@ -96,6 +103,7 @@ class KnowledgeStore:
                     "title": item.title,
                     "tags": ",".join(item.tags),
                     "source": item.source,
+                    "note_link": note_link,
                     "created_at": item.created_at.isoformat(),
                     "created_ts": item.created_at.timestamp(),
                 }
@@ -122,7 +130,9 @@ class KnowledgeStore:
             where = where_parts[0]
         elif where_parts:
             where = {"$and": where_parts}
-        embedding = self.model.encode([query], normalize_embeddings=True).tolist()
+        embedding = self.model.encode(
+            [query], prompt_name="query", normalize_embeddings=True
+        ).tolist()
         result = self._collection.query(
             query_embeddings=embedding,
             n_results=top_k or self.settings.knowledge_top_k,
@@ -137,6 +147,7 @@ class KnowledgeStore:
                 content=document,
                 title=metadata.get("title", "未命名"),
                 source=metadata.get("source", "未知来源"),
+                note_link=metadata.get("note_link", ""),
                 created_at=datetime.fromisoformat(metadata["created_at"]),
                 score=1 - distance if distance is not None else None,
             )

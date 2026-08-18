@@ -9,14 +9,7 @@ def test_evaluation_metrics(tmp_path) -> None:
             {
                 "name": "牛奶",
                 "normalized_name": "牛奶",
-                "quantity": 1,
-                "unit": "盒",
-                "production_date": None,
-                "shelf_life_days": None,
-                "expiry_date": "2026-08-01",
-                "date_source": "printed",
                 "confidence": 0.9,
-                "evidence_text": "2026-08-01",
             }
         ],
         "model_version": "v1",
@@ -29,5 +22,7 @@ def test_evaluation_metrics(tmp_path) -> None:
     )
     metrics = evaluate(dataset)
     assert metrics["strict_json_rate"] == 1
-    assert metrics["ingredient_name_accuracy"] == 1
-    assert metrics["full_sample_accuracy"] == 1
+    assert metrics["ingredient_precision"] == 1
+    assert metrics["ingredient_recall"] == 1
+    assert metrics["ingredient_f1"] == 1
+    assert metrics["exact_sample_accuracy"] == 1

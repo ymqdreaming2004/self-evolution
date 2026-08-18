@@ -7,14 +7,15 @@ from uuid import uuid4
 from .providers.chat import ChatProvider, json_for_prompt
 from .schemas import ExecutionPlan, IncomingMessage, Intent, PlannedTask, TaskKind
 
-PLANNER_SYSTEM = """你是个人智能中枢的 Planner。必须使用 Plan-and-Execute 模式拆分输入。
+PLANNER_SYSTEM = """你是个人智能中枢的 Planner。你只能输出一个主任务，先识别意图再路由。
 intent 只允许 knowledge_store、knowledge_query、inspiration、fridge_ingest、fridge_query、
-fridge_mutate、recipe、placeholder。kind 只允许 inspiration、fridge、placeholder。
-为每个任务指定与 intent 对应的 kind：knowledge_store、knowledge_query、inspiration 使用
-inspiration；fridge_ingest、fridge_query、fridge_mutate、recipe 使用 fridge；placeholder 使用
-placeholder。图片消息必须包含 fridge_ingest，且 fridge_ingest 和 fridge_mutate 必须
-requires_confirmation=true。任务必须彼此独立，dependencies 保持为空。无法支持的请求使用
-placeholder；不要虚构能力。输出必须严格符合 JSON schema。"""
+fridge_mutate、recipe、general_chat。kind 只允许 inspiration、fridge、general。
+knowledge_store、knowledge_query、inspiration 使用 inspiration；fridge_ingest、fridge_query、
+fridge_mutate、recipe 使用 fridge；其他普通对话使用 general。图片消息必须路由为
+fridge_ingest；fridge_ingest 和 fridge_mutate 必须 requires_confirmation=true。冰箱 Agent
+只负责识别食材、维护现有食材清单和基于清单推荐菜，不处理日期、临期、数量或采购。任务
+dependencies 必须为空。general_chat 只能对话，不得声称可以写入知识、灵感或库存。
+输出必须严格符合 JSON schema。"""
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ _INTENT_KINDS = {
     Intent.FRIDGE_QUERY: TaskKind.FRIDGE,
     Intent.FRIDGE_MUTATE: TaskKind.FRIDGE,
     Intent.RECIPE: TaskKind.FRIDGE,
-    Intent.PLACEHOLDER: TaskKind.PLACEHOLDER,
+    Intent.GENERAL_CHAT: TaskKind.GENERAL,
 }
 _CONFIRMATION_INTENTS = {Intent.FRIDGE_INGEST, Intent.FRIDGE_MUTATE}
 
@@ -58,80 +59,62 @@ class Planner:
 
     @staticmethod
     def validate_plan(plan: ExecutionPlan, message: IncomingMessage) -> None:
-        """Reject unsafe or unsupported model plans before dispatching agents in parallel."""
-        if not plan.tasks:
-            raise ValueError("planner returned no tasks")
+        """Reject unsafe plans before dispatching the single routed agent."""
+        if len(plan.tasks) != 1:
+            raise ValueError("planner must return exactly one primary task")
         if plan.intent != plan.tasks[0].intent:
-            raise ValueError("primary intent must match the first task")
-
-        task_ids = [task.id for task in plan.tasks]
-        if len(task_ids) != len(set(task_ids)):
-            raise ValueError("planner task IDs must be unique")
-        if plan.requires_confirmation != any(task.requires_confirmation for task in plan.tasks):
+            raise ValueError("primary intent must match the task")
+        if plan.requires_confirmation != plan.tasks[0].requires_confirmation:
             raise ValueError("plan confirmation flag does not match task flags")
 
-        for task in plan.tasks:
-            if not task.instruction.strip():
-                raise ValueError("planner task instruction must not be empty")
-            if task.kind != _INTENT_KINDS[task.intent]:
-                raise ValueError(f"task kind does not match intent: {task.intent.value}")
-            if task.dependencies:
-                raise ValueError("task dependencies are not supported by the parallel workflow")
-            if task.intent in _CONFIRMATION_INTENTS and not task.requires_confirmation:
-                raise ValueError(f"confirmation is required for {task.intent.value}")
-
-        task_intents = {task.intent for task in plan.tasks}
-        if message.images and Intent.FRIDGE_INGEST not in task_intents:
-            raise ValueError("image messages must include fridge_ingest")
-        if not message.images and Intent.FRIDGE_INGEST in task_intents:
+        task = plan.tasks[0]
+        if not task.instruction.strip():
+            raise ValueError("planner task instruction must not be empty")
+        if task.kind != _INTENT_KINDS[task.intent]:
+            raise ValueError(f"task kind does not match intent: {task.intent.value}")
+        if task.dependencies:
+            raise ValueError("task dependencies are not supported")
+        if task.intent in _CONFIRMATION_INTENTS and not task.requires_confirmation:
+            raise ValueError(f"confirmation is required for {task.intent.value}")
+        if message.images and task.intent != Intent.FRIDGE_INGEST:
+            raise ValueError("image messages must route to fridge_ingest")
+        if not message.images and task.intent == Intent.FRIDGE_INGEST:
             raise ValueError("fridge_ingest requires an image")
 
     @staticmethod
     def heuristic_plan(message: IncomingMessage) -> ExecutionPlan:
         text = message.text.strip().lower()
-        intents: list[Intent] = []
         if message.images:
-            intents.append(Intent.FRIDGE_INGEST)
-        if any(word in text for word in ("菜谱", "做什么菜", "吃什么")):
-            intents.append(Intent.RECIPE)
-        elif any(word in text for word in ("临期", "过期", "冰箱里", "库存", "食材列表")):
-            intents.append(Intent.FRIDGE_QUERY)
-        elif re.search(r"(消耗|吃掉|删除|移除|修改).{0,40}[0-9a-f]{8}", text):
-            intents.append(Intent.FRIDGE_MUTATE)
-        if any(word in text for word in ("知识库", "我之前", "查找笔记", "搜索知识")):
-            intents.append(Intent.KNOWLEDGE_QUERY)
+            intent = Intent.FRIDGE_INGEST
+        elif any(word in text for word in ("菜谱", "做什么菜", "吃什么")):
+            intent = Intent.RECIPE
+        elif any(word in text for word in ("冰箱里", "现有食材", "有什么食材", "食材列表")):
+            intent = Intent.FRIDGE_QUERY
+        elif re.search(r"(用完|吃完|没有了|移除|删除)", text):
+            intent = Intent.FRIDGE_MUTATE
+        elif any(word in text for word in ("知识库", "我之前", "查找笔记", "搜索知识")):
+            intent = Intent.KNOWLEDGE_QUERY
         elif any(word in text for word in ("灵感", "点子", "todo", "待办")):
-            intents.append(Intent.INSPIRATION)
+            intent = Intent.INSPIRATION
         elif (
             message.urls
             or len(text) >= 180
             or any(word in text for word in ("收藏", "保存知识", "记录文章", "沉淀"))
         ):
-            intents.append(Intent.KNOWLEDGE_STORE)
-        if not intents:
-            intents.append(Intent.PLACEHOLDER)
-        intents = list(dict.fromkeys(intents))
-        tasks: list[PlannedTask] = []
-        for intent in intents:
-            kind = (
-                TaskKind.FRIDGE
-                if intent.value.startswith("fridge") or intent == Intent.RECIPE
-                else TaskKind.INSPIRATION
-                if intent.value.startswith("knowledge") or intent == Intent.INSPIRATION
-                else TaskKind.PLACEHOLDER
-            )
-            tasks.append(
-                PlannedTask(
-                    id=str(uuid4()),
-                    kind=kind,
-                    intent=intent,
-                    instruction=message.text or intent.value,
-                    requires_confirmation=intent in _CONFIRMATION_INTENTS,
-                )
-            )
+            intent = Intent.KNOWLEDGE_STORE
+        else:
+            intent = Intent.GENERAL_CHAT
+
+        task = PlannedTask(
+            id=str(uuid4()),
+            kind=_INTENT_KINDS[intent],
+            intent=intent,
+            instruction=message.text or intent.value,
+            requires_confirmation=intent in _CONFIRMATION_INTENTS,
+        )
         return ExecutionPlan(
-            intent=intents[0],
-            tasks=tasks,
-            requires_confirmation=any(task.requires_confirmation for task in tasks),
+            intent=intent,
+            tasks=[task],
+            requires_confirmation=task.requires_confirmation,
             rationale="本地规则路由",
         )

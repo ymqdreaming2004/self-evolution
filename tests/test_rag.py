@@ -1,4 +1,8 @@
-from self_evolution_agent.rag import chunk_text, clean_text
+from self_evolution_agent.rag import (
+    chunk_text,
+    clean_text,
+    collection_name_for_model,
+)
 
 
 def test_clean_text_normalizes_whitespace() -> None:
@@ -15,3 +19,10 @@ def test_chunk_text_preserves_overlap_and_content() -> None:
 
 def test_chunk_text_empty() -> None:
     assert chunk_text("   \n") == []
+
+
+def test_collection_name_is_model_specific() -> None:
+    assert (
+        collection_name_for_model("Qwen/Qwen3-Embedding-0.6B")
+        == "personal_knowledge_qwen_qwen3_embedding_0_6b"
+    )

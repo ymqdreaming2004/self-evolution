@@ -6,7 +6,7 @@ from typing import Annotated, Any, TypedDict
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, Send, interrupt
 
-from .agents import FridgeAgent, InspirationAgent, PlaceholderAgent
+from .agents import FridgeAgent, GeneralChatAgent, InspirationAgent
 from .effects import EffectExecutor, query_card_effect
 from .planner import Planner
 from .schemas import AgentEffect, AgentResult, ExecutionPlan, IncomingMessage, PlannedTask
@@ -31,14 +31,14 @@ class AgentWorkflow:
         planner: Planner,
         inspiration: InspirationAgent,
         fridge: FridgeAgent,
-        placeholder: PlaceholderAgent,
+        general: GeneralChatAgent,
         effects: EffectExecutor,
         checkpointer: Any,
     ):
         self.planner = planner
         self.inspiration = inspiration
         self.fridge = fridge
-        self.placeholder = placeholder
+        self.general = general
         self.effects = effects
         self.graph = self._build(checkpointer)
 
@@ -47,7 +47,7 @@ class AgentWorkflow:
         graph.add_node("planner", self._plan)
         graph.add_node("inspiration", self._run_inspiration)
         graph.add_node("fridge", self._run_fridge)
-        graph.add_node("placeholder", self._run_placeholder)
+        graph.add_node("general", self._run_general)
         graph.add_node("aggregate", self._aggregate)
         graph.add_node("execute_effects", self._execute_effects)
         graph.add_node("wait_confirmation", self._wait_confirmation)
@@ -57,7 +57,7 @@ class AgentWorkflow:
         graph.add_conditional_edges("planner", self._dispatch_tasks)
         graph.add_edge("inspiration", "aggregate")
         graph.add_edge("fridge", "aggregate")
-        graph.add_edge("placeholder", "aggregate")
+        graph.add_edge("general", "aggregate")
         graph.add_edge("aggregate", "execute_effects")
         graph.add_conditional_edges(
             "execute_effects",
@@ -96,8 +96,8 @@ class AgentWorkflow:
         )
         return {"results": [result.model_dump(mode="json")]}
 
-    async def _run_placeholder(self, state: GraphState) -> dict[str, Any]:
-        result = await self.placeholder.run(
+    async def _run_general(self, state: GraphState) -> dict[str, Any]:
+        result = await self.general.run(
             PlannedTask.model_validate(state["task"]),
             IncomingMessage.model_validate(state["message"]),
         )

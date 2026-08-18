@@ -5,7 +5,7 @@
 项目基于 FastAPI、LangGraph、SQLite 和 ChromaDB 构建，当前聚焦两个可形成数据闭环的生活场景：
 
 1. **数字资产沉淀**：识别知识、灵感和 TODO，将知识写入本地向量库，将灵感写入飞书多维表格，并支持带来源引用的知识检索问答。
-2. **物理资产管理**：通过本地视觉模型识别食材和包装日期，经用户确认后写入冰箱库存，支持库存维护、临期查询和菜谱推荐。
+2. **冰箱助手**：通过本地视觉模型识别食材，经用户确认后维护极简的现有食材清单，并根据清单推荐菜。
 
 本项目不是通用聊天机器人。无法匹配现有能力的请求会由 Placeholder Agent 记录，作为后续扩展记账、健康等专业 Agent 的需求依据。
 
@@ -37,21 +37,19 @@
 - 识别飞书文本中的知识、长文、网页链接、灵感和 TODO。
 - 网页抓取支持正文清洗、重定向限制、响应体积限制和 SSRF 防护。
 - 知识按约 650 个字符分块，默认重叠 80 个字符。
-- 使用 `BAAI/bge-small-zh-v1.5` 在 CPU 上生成中文向量。
-- 使用 ChromaDB 本地持久化知识片段及来源元数据。
+- 使用 `Qwen/Qwen3-Embedding-0.6B` 在 CPU 上生成多语言向量；查询侧使用模型内置的 `query` prompt。
+- 知识原文先写入 Obsidian Vault 的 Markdown 文件，再由 ChromaDB 持久化片段、向量及 Obsidian 文件链接。
 - 支持语义召回、时间范围过滤以及带 `[序号]` 来源引用的生成式回答。
 - 灵感/TODO 结构化后幂等写入已有飞书多维表格。
 
 ### 冰箱资产
 
-- 从飞书图片消息下载食材照片或包装标签图。
-- 调用独立视觉服务识别名称、数量、单位、生产日期、保质期和到期日。
-- 识别结果通过飞书交互卡片展示，用户可修改名称、数量和到期日。
-- 日期无法识别时禁止自动推测，必须补充日期或明确填写 `unknown`。
-- 用户确认后，以事务方式写入 SQLite 库存表并保留模型版本。
-- 支持库存列表、临期/过期查询、修改、消耗和删除。
-- 菜谱推荐优先使用临期食材，区分库存食材和需要外购的辅料。
-- 菜谱生成不会自动扣减库存，防止未经确认产生数据副作用。
+- 从飞书图片消息下载食材照片，调用独立视觉服务识别食材名称。
+- 识别结果通过飞书交互卡片展示；用户可修改名称或清空误识别条目。
+- 用户确认后，将食材写入 SQLite 的“现有食材”清单；同名食材自动合并。
+- 支持查看现有食材和将已用完的食材移出清单。
+- 根据现有食材推荐简单菜品，并区分已有食材与需要补充的辅料。
+- 不识别数量、包装日期、保质期或临期状态；菜品推荐不会自动修改清单。
 
 ### 工程能力
 
@@ -81,7 +79,8 @@ flowchart LR
     PLANNER --> PA["Placeholder Agent"]
 
     IA --> WEB["安全网页抓取器"]
-    IA --> EMB["bge-small-zh Embedding"]
+    IA --> VAULT["Obsidian Vault (Markdown)"]
+    VAULT --> EMB["Qwen3-Embedding-0.6B"]
     EMB --> CHROMA[("ChromaDB")]
     IA --> BITABLE["飞书多维表格"]
 
@@ -218,8 +217,8 @@ Planner 使用严格结构化输出生成：
 | `knowledge_query` | Inspiration | 查询知识库并生成带引用回答 |
 | `inspiration` | Inspiration | 整理灵感或 TODO，准备写入 Bitable |
 | `fridge_ingest` | Fridge | 识别图片并发起确认 |
-| `fridge_query` | Fridge | 查询全部、临期或过期库存 |
-| `fridge_mutate` | Fridge | 修改、消耗或删除库存 |
+| `fridge_query` | Fridge | 查看现有食材清单 |
+| `fridge_mutate` | Fridge | 将食材标记为已用完 |
 | `recipe` | Fridge | 根据库存生成菜谱 |
 | `placeholder` | Placeholder | 记录未支持需求并返回能力边界 |
 
@@ -248,9 +247,9 @@ Planner 使用严格结构化输出生成：
 
 - 调用独立 `VisionProvider` 识别图片。
 - 保存识别草稿和模型原始输出。
-- 查询全部库存或未来 3 天内临期/已过期食材。
-- 从自然语言提取修改、消耗和删除动作。
-- 根据库存和到期日生成结构化菜谱。
+- 由用户确认或修正食材名称后更新现有食材清单。
+- 查询现有食材，或从自然语言提取“已用完”的食材名称。
+- 根据现有食材生成结构化菜品推荐。
 - 所有写操作交由确认和副作用层执行。
 
 ### Placeholder Agent
@@ -273,21 +272,22 @@ Planner 使用严格结构化输出生成：
 | --- | --- | --- |
 | `jobs` | 持久任务队列 | 状态、尝试次数、下次执行时间、错误、幂等键 |
 | `processed_events` | 事件去重扩展位 | 飞书事件 ID、接收时间 |
-| `inventory_items` | 冰箱库存 | 食材、数量、单位、日期、状态、图片、模型版本 |
+| `inventory_items` | 现有食材 | 食材名称、状态、来源图片、模型版本 |
 | `recognition_drafts` | 视觉识别草稿 | 原始预测、用户修正、图片路径、确认状态 |
 | `pending_actions` | 待确认操作 | 动作类型、payload、用户、过期时间、状态 |
 | `side_effects` | 外部副作用账本 | 幂等键、类型、状态、响应、错误 |
 | `unhandled_intents` | 未支持需求池 | 原始请求、Planner 意图、用户、时间 |
 
-库存不执行物理删除：
+食材清单不执行物理删除：
 
-- `active`：有效库存。
-- `consumed`：已消耗。
-- `deleted`：用户删除。
+- `active`：当前已有。
+- `consumed`：已经用完。
 
 ### ChromaDB
 
-默认集合名为 `personal_knowledge`，持久化目录是 `data/chroma`。
+知识原文保存于 Obsidian Vault（默认 `data/obsidian-vault`），每个文件包含标题、标签、创建时间和原始来源的 YAML frontmatter。Chroma 仅作为可重建检索索引，保存片段、向量、来源以及 `obsidian://` 文件链接；RAG 回复会附带对应 Markdown 文件链接。
+
+集合名由 Embedding 模型派生，当前为 `personal_knowledge_qwen_qwen3_embedding_0_6b`，持久化目录是 `data/chroma`。更换模型会创建一个新集合，旧集合不会被删除；需要从 Obsidian Vault 重新入库后才能用新模型检索已有知识。
 
 每个向量片段保存：
 
@@ -317,7 +317,7 @@ Planner 使用严格结构化输出生成：
 
 ### 快速测试 Embedding
 
-当前默认 Embedding 模型是 `BAAI/bge-small-zh-v1.5`，在 CPU 上通过
+当前默认 Embedding 模型是 `Qwen/Qwen3-Embedding-0.6B`，在 CPU 上通过
 `sentence-transformers` 运行。可执行以下命令查看向量维度和中文语义相似度排名：
 
 ```powershell
@@ -342,7 +342,7 @@ Planner 使用严格结构化输出生成：
 3. 清理多余空格、换行、脚本、样式、导航和页脚。
 4. 使用模型提取标题和最多 8 个标签；失败时使用本地标题兜底。
 5. 按目标 650 字符、80 字符重叠进行分块，并尽量在中文标点处切断。
-6. 使用 `bge-small-zh-v1.5` 生成归一化向量。
+6. 使用 `Qwen3-Embedding-0.6B` 生成归一化向量；查询时使用其内置 `query` prompt，文档不添加 prompt。
 7. 将向量、文本和来源元数据写入 ChromaDB。
 
 ### 查询
@@ -358,11 +358,12 @@ Planner 使用严格结构化输出生成：
 
 ### 本地推理模型
 
-针对 RTX 4060 8GB，默认配置：
+针对 RTX 4060 8GB，当前部署配置：
 
-- 模型：`Qwen/Qwen2.5-VL-3B-Instruct`
+- 底座：本地 `Qwen3.5-2B`
+- 微调权重：`outputs/qwen35-fridge-qlora` 中的 PEFT LoRA Adapter
 - 量化：BitsAndBytes NF4 4-bit
-- 计算精度：FP16
+- 计算精度：BF16
 - 并发：单请求，通过 `asyncio.Lock` 串行执行
 - 加载方式：首次识别时懒加载
 - 输出：严格 `VisionResult` JSON
@@ -377,29 +378,23 @@ Planner 使用严格结构化输出生成：
 {
   "name": "牛奶",
   "normalized_name": "牛奶",
-  "quantity": 1,
-  "unit": "盒",
-  "production_date": "2026-07-20",
-  "shelf_life_days": 7,
-  "expiry_date": "2026-07-27",
-  "date_source": "printed",
-  "confidence": 0.96,
-  "evidence_text": "生产日期 2026-07-20"
+  "confidence": 0.96
 }
 ```
 
-如果同时存在生产日期和保质期但没有到期日，Pydantic schema 会计算到期日，并将 `date_source` 标记为 `calculated`。
+### Qwen3.5 QLoRA
 
-### 云端 QLoRA
+当前可部署 Adapter 位于 `outputs/qwen35-fridge-qlora`，底座位于
+`train_venv/models/Qwen3.5-2B`。视觉服务先以 NF4 4-bit 加载底座，再通过 PEFT
+挂载 Adapter；Adapter 不是完整模型，部署和备份时必须同时保留底座与 Adapter。
 
-训练脚本位于 `scripts/train_qlora.py`：
+本次训练使用 LLaMAFactory 配置 `outputs/qwen35-fridge-lora/training_args.yaml`：
 
-- 基座：Qwen2.5-VL-3B-Instruct
+- 基座：Qwen3.5-2B
 - 量化：4-bit NF4 + double quantization
 - 微调：LoRA，目标层包括注意力和 MLP 投影层
 - 训练精度：BF16
-- 显存策略：梯度累积与 gradient checkpointing
-- 数据格式：JSONL，每条记录包含图片路径和目标 `VisionResult`
+- 数据格式：LLaMAFactory 多模态 ShareGPT JSON，每条记录包含图片路径和目标 `VisionResult`
 
 确认后的样本导出：
 
@@ -425,9 +420,8 @@ python scripts/evaluate_vision.py data/training/predictions.jsonl
 评测输出：
 
 - 严格 JSON 成功率
-- 食材名称准确率
-- 到期日准确率
-- 完整样本准确率
+- 食材识别精确率、召回率和 F1
+- 整张图片食材集合完全正确率
 
 建议发布门槛：严格 JSON 成功率不低于 `99%`，食材名称准确率不低于 `90%`。
 
@@ -453,7 +447,7 @@ python scripts/evaluate_vision.py data/training/predictions.jsonl
 | LangChain Core | LangGraph 依赖的消息与运行时基础 |
 | OpenAI Python SDK | 调用 OpenAI-compatible Chat API |
 | JSON Schema Structured Output | Planner、菜谱、元数据和库存动作结构化输出 |
-| Qwen2.5-VL-3B | 本地食材和包装日期识别 |
+| Qwen2.5-VL-3B | 本地食材名称识别 |
 | Transformers | Qwen-VL 模型加载和生成 |
 | BitsAndBytes | NF4 4-bit 推理与 QLoRA |
 | Accelerate | 模型设备映射和推理支持 |
@@ -468,7 +462,7 @@ python scripts/evaluate_vision.py data/training/predictions.jsonl
 | aiosqlite | SQLite 异步驱动和 LangGraph checkpoint |
 | ChromaDB | 本地向量知识库 |
 | sentence-transformers | 本地中文 Embedding 推理 |
-| bge-small-zh-v1.5 | 中文向量化模型 |
+| Qwen3-Embedding-0.6B | 多语言向量化模型 |
 | Beautiful Soup | 网页正文清洗 |
 
 ### 工程与部署
@@ -662,7 +656,8 @@ https://<你的公网域名>/webhooks/feishu/actions
 | `PLANNER_BASE_URL` | 与 `CHAT_BASE_URL` 相同 | 否 | Planner 专用 OpenAI-compatible API 地址 |
 | `PLANNER_API_KEY` | 与 `CHAT_API_KEY` 相同 | 否 | Planner 专用 API 密钥 |
 | `PLANNER_MODEL` | 与 `CHAT_MODEL` 相同 | 否 | Planner 专用模型 |
-| `EMBEDDING_MODEL` | `BAAI/bge-small-zh-v1.5` | 否 | 本地 Embedding 模型 |
+| `EMBEDDING_MODEL` | `Qwen/Qwen3-Embedding-0.6B` | 否 | 本地 Embedding 模型 |
+| `OBSIDIAN_VAULT_PATH` | `./data/obsidian-vault` | 否 | Obsidian Vault 本地目录 |
 
 ChatProvider 优先使用 `json_schema` structured output。如果兼容服务不支持，会回退到 `json_object` 并在系统提示中附加 JSON Schema。
 
@@ -671,8 +666,9 @@ ChatProvider 优先使用 `json_schema` structured output。如果兼容服务�
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `VISION_BASE_URL` | `http://vision:8001` | Worker 访问视觉服务的地址 |
-| `VISION_MODEL_NAME` | `Qwen/Qwen2.5-VL-3B-Instruct` | Hugging Face 模型名称或本地模型路径 |
-| `VISION_MODEL_VERSION` | `qwen2.5-vl-3b-4bit-v1` | 写入草稿和库存的模型版本 |
+| `VISION_MODEL_NAME` | `Qwen/Qwen3.5-2B` | Hugging Face 底座模型名称或本地路径 |
+| `VISION_ADAPTER_PATH` | 空 | PEFT LoRA Adapter 本地路径；为空时仅加载底座 |
+| `VISION_MODEL_VERSION` | `qwen3.5-2b-fridge-qlora-v1` | 写入草稿和库存的模型版本 |
 | `VISION_MAX_IMAGE_BYTES` | `10485760` | 单张图片最大 10 MiB |
 
 ### 任务与抓取
@@ -730,10 +726,23 @@ docker compose logs -f api worker vision
 docker compose down
 ```
 
+### 纯 Python 启动视觉服务
+
+当前 Windows 训练环境已经包含 CUDA PyTorch 和模型推理依赖，可直接运行：
+
+```powershell
+.\scripts\start_vision.ps1
+```
+
+服务监听 `http://127.0.0.1:8001`。首次识别时才加载底座与 Adapter；可先访问
+`/health/ready` 检查 CUDA，再向 `/v1/recognize` 上传图片触发模型加载。
+
 Compose 使用绑定目录保存数据：
 
 - `./data:/data`
-- `./models:/models`
+- `./models:/models/huggingface`
+- `./train_venv/models/Qwen3.5-2B:/models/Qwen3.5-2B:ro`
+- `./outputs/qwen35-fridge-qlora:/models/qwen35-fridge-qlora:ro`
 
 因此重新构建容器不会删除库存、知识库、checkpoint 或模型缓存。
 
@@ -773,7 +782,7 @@ http://127.0.0.1:8000/docs
 - Planner 本地路由和多意图拆分。
 - 文本清洗与分块。
 - SQLite Job 幂等入队。
-- 库存创建、临期查询和消耗。
+- 现有食材创建、查询、去重和标记用完。
 - 飞书文本事件和卡片表单解析。
 - 飞书签名验证。
 - LangGraph 并行派发、聚合、interrupt 和 resume。
@@ -804,7 +813,7 @@ http://127.0.0.1:8000/docs
 .\.venv\Scripts\python.exe -m compileall -q src scripts tests
 ```
 
-当前验证结果：`19` 个测试通过，Ruff 检查通过，API/Worker/Vision 模块导入与 Worker 初始化通过。
+当前验证结果：`29` 个测试通过，Ruff 检查通过，API/Worker/Vision 模块导入与 Worker 初始化通过。
 
 ## 安全与可靠性
 
@@ -825,8 +834,8 @@ http://127.0.0.1:8000/docs
 - `side_effects.idempotency_key` 防止重复外部操作。
 - 飞书消息额外使用稳定 `uuid` 参数降低重试重复发送概率。
 - 图片识别不会直接写库存。
-- 修改、消耗和删除必须经确认。
-- 到期日缺失时禁止模型自动猜测。
+- 识别确认和标记用完必须经确认。
+- 视觉模型只识别可可靠确认的食材，不猜测日期、数量或非食材。
 
 ### 任务可靠性
 
@@ -844,10 +853,10 @@ http://127.0.0.1:8000/docs
 - 不支持 PDF、Word 等文件附件解析。
 - 不处理飞书加密事件正文。
 - 不提供 Web 管理后台。
-- 不主动推送临期提醒，只支持按需查询。
+- 不识别数量、包装日期、保质期或临期状态。
 - 当前专业 Agent 是受限工具的 ReAct 风格执行，不是开放式自主工具循环。
 - SQLite 队列按单 Worker 设计，不适合直接扩展为多个并发 Worker 实例。
 - 本地视觉模型尚需在目标 CUDA/RTX 4060 环境中完成真实显存、延迟和识别准确率验收。
 - Docker Compose 的 GPU 部署依赖宿主机正确安装 Docker Desktop、WSL2 和 NVIDIA Container Toolkit。
 
-后续可扩展方向包括多人数据隔离、群聊协作、主动临期提醒、PDF/文档摄取、更成熟的混合检索，以及记账、健康等新 Agent。
+后续扩展应优先依据真实使用反馈决定；当前冰箱 Agent 保持“识别食材 + 推荐菜”的小范围闭环。

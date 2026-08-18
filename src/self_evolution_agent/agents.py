@@ -2,14 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import re
+from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from .providers.chat import ChatProvider, json_for_prompt
+from .providers.obsidian import ObsidianVault
 from .providers.vision import VisionProvider
 from .providers.web import WebContentFetcher
 from .rag import KnowledgeStore
-from .repositories import DraftRepository, InventoryRepository, record_unhandled
+from .repositories import DraftRepository, InventoryRepository
+from .responses import (
+    inspiration_recorded,
+    knowledge_not_found,
+    knowledge_search_results,
+    knowledge_stored,
+)
 from .schemas import (
     AgentEffect,
     AgentResult,
@@ -25,10 +33,18 @@ from .schemas import (
 class InspirationAgent:
     """ReAct-style specialist with a fixed knowledge/idea tool whitelist."""
 
-    def __init__(self, *, chat: ChatProvider, store: KnowledgeStore, web: WebContentFetcher):
+    def __init__(
+        self,
+        *,
+        chat: ChatProvider,
+        store: KnowledgeStore,
+        web: WebContentFetcher,
+        vault: ObsidianVault,
+    ):
         self.chat = chat
         self.store = store
         self.web = web
+        self.vault = vault
 
     async def run(self, task: PlannedTask, message: IncomingMessage) -> AgentResult:
         try:
@@ -59,46 +75,47 @@ class InspirationAgent:
         if message.text.strip():
             sources.append(("飞书消息", message.text, f"feishu:{message.message_id}"))
         counts = 0
-        titles = []
         for fallback_title, content, source in sources:
             metadata = await self._metadata(content)
             title = metadata.title or fallback_title
+            document_id = str(uuid4())
+            note = await asyncio.to_thread(
+                self.vault.write_knowledge,
+                document_id=document_id,
+                title=title,
+                content=content,
+                tags=metadata.tags,
+                source=source,
+                created_at=message.received_at,
+            )
             chunks = await asyncio.to_thread(
                 self.store.add_document,
                 content=content,
                 title=title,
                 tags=metadata.tags,
                 source=source,
+                note_link=note.link,
                 created_at=message.received_at,
+                document_id=document_id,
             )
             counts += len(chunks)
-            titles.append(title)
         return AgentResult(
             task_id=task.id,
             intent=task.intent,
-            reply=f"已沉淀 {len(sources)} 条知识，共 {counts} 个片段：" + "、".join(titles),
+            reply=knowledge_stored(document_count=len(sources), chunk_count=counts),
         )
 
     async def _query(self, task: PlannedTask, message: IncomingMessage) -> AgentResult:
         hits = await asyncio.to_thread(self.store.search, message.text)
         if not hits:
             return AgentResult(
-                task_id=task.id, intent=task.intent, reply="知识库中没有找到相关内容。"
+                task_id=task.id, intent=task.intent, reply=knowledge_not_found()
             )
-        context = "\n\n".join(
-            f"[{index}] {hit.title}\n{hit.content}\n来源：{hit.source}"
-            for index, hit in enumerate(hits, start=1)
+        return AgentResult(
+            task_id=task.id,
+            intent=task.intent,
+            reply=knowledge_search_results(hits),
         )
-        try:
-            answer = await self.chat.text(
-                system="只依据给定资料回答。每个关键结论使用 [序号] 引用；资料不足时明确说明。",
-                user=f"问题：{message.text}\n\n资料：\n{context}",
-            )
-        except Exception:
-            answer = "找到以下相关内容：\n" + "\n".join(
-                f"[{index}] {hit.title} - {hit.source}" for index, hit in enumerate(hits, start=1)
-            )
-        return AgentResult(task_id=task.id, intent=task.intent, reply=answer)
 
     async def _idea(self, task: PlannedTask, message: IncomingMessage) -> AgentResult:
         metadata = await self._metadata(message.text, "灵感")
@@ -113,7 +130,7 @@ class InspirationAgent:
         return AgentResult(
             task_id=task.id,
             intent=task.intent,
-            reply=f"已整理为{idea.type}：{idea.title}",
+            reply=inspiration_recorded(idea_type=idea.type, title=idea.title),
             effects=[
                 AgentEffect(
                     type="bitable_append",
@@ -151,6 +168,12 @@ class FridgeAgent:
             raise ValueError("食材图片尚未下载")
         image = message.images[0]
         result = await self.vision.recognize(image.local_path)
+        if not result.items:
+            return AgentResult(
+                task_id=task.id,
+                intent=task.intent,
+                reply="没有识别到可以确认的食材，请换一张更清晰的照片重试。",
+            )
         async with self.sessions() as session:
             draft = await DraftRepository(session).create(
                 owner_id=message.open_id,
@@ -181,22 +204,13 @@ class FridgeAgent:
 
     async def _query(self, task: PlannedTask, message: IncomingMessage) -> AgentResult:
         async with self.sessions() as session:
-            repository = InventoryRepository(session)
-            if any(word in message.text for word in ("临期", "过期")):
-                items = await repository.list_expiring(message.open_id)
-                title = "临期与过期食材"
-            else:
-                items = await repository.list_active(message.open_id)
-                title = "冰箱库存"
+            items = await InventoryRepository(session).list_active(message.open_id)
         data = {
-            "title": title,
+            "title": "现有食材",
             "items": [
                 {
                     "id": item.id,
                     "name": item.name,
-                    "quantity": item.quantity,
-                    "unit": item.unit,
-                    "expiry_date": item.expiry_date.isoformat() if item.expiry_date else None,
                 }
                 for item in items
             ],
@@ -208,43 +222,45 @@ class FridgeAgent:
             items = await InventoryRepository(session).list_active(message.open_id)
         if not items:
             return AgentResult(
-                task_id=task.id, intent=task.intent, reply="冰箱库存为空，暂时无法推荐菜谱。"
+                task_id=task.id, intent=task.intent, reply="现有食材清单为空，暂时无法推荐菜。"
             )
         inventory = [
-            {
-                "name": item.name,
-                "quantity": item.quantity,
-                "unit": item.unit,
-                "expiry_date": item.expiry_date,
-            }
+            {"name": item.name}
             for item in items
         ]
         recipe = await self.chat.structured(
             schema=RecipeResult,
-            system="生成优先消耗临期食材的菜谱。允许少量外购辅料，必须区分两类食材。",
+            system=(
+                "根据现有食材推荐 3 道简单可做的菜。只能把清单中的食材列为现有食材；"
+                "允许少量外购辅料，并且必须明确区分现有食材和需要补充的食材。"
+            ),
             user=json_for_prompt({"request": message.text, "inventory": inventory}),
         )
-        lines = [f"**{recipe.title}**（{recipe.servings} 人份）", "", "库存食材："]
-        lines.extend(f"- {item}" for item in recipe.inventory_ingredients)
-        if recipe.extra_ingredients:
-            lines.append("\n需要补充：")
-            lines.extend(f"- {item}" for item in recipe.extra_ingredients)
-        lines.append("\n步骤：")
-        lines.extend(f"{index}. {step}" for index, step in enumerate(recipe.steps, start=1))
-        if recipe.notes:
-            lines.append(f"\n提示：{recipe.notes}")
+        lines = []
+        for recipe_index, suggestion in enumerate(recipe.recipes, start=1):
+            if lines:
+                lines.append("\n---\n")
+            lines.extend([f"### {recipe_index}. {suggestion.title}", "", "现有食材："])
+            lines.extend(f"- {item}" for item in suggestion.inventory_ingredients)
+            if suggestion.extra_ingredients:
+                lines.append("\n需要补充：")
+                lines.extend(f"- {item}" for item in suggestion.extra_ingredients)
+            lines.append("\n步骤：")
+            lines.extend(
+                f"{index}. {step}" for index, step in enumerate(suggestion.steps, start=1)
+            )
         return AgentResult(task_id=task.id, intent=task.intent, reply="\n".join(lines))
 
     async def _mutation(self, task: PlannedTask, message: IncomingMessage) -> AgentResult:
         mutation = await self.chat.structured(
             schema=InventoryMutation,
-            system="从命令提取库存操作。item_id 必须来自用户原文，不得猜测。",
+            system="从用户命令中提取已经用完的食材名称。不要添加原文中没有出现的食材。",
             user=message.text,
         )
         return AgentResult(
             task_id=task.id,
             intent=task.intent,
-            reply="该库存操作需要确认。",
+            reply=f"需要确认是否将“{mutation.item_name}”标记为已用完。",
             effects=[
                 AgentEffect(
                     type="inventory_mutation",
@@ -256,20 +272,22 @@ class FridgeAgent:
         )
 
 
-class PlaceholderAgent:
-    def __init__(self, sessions: async_sessionmaker):
-        self.sessions = sessions
+class GeneralChatAgent:
+    """Fallback conversation agent with no data-writing dependencies."""
+
+    def __init__(self, chat: ChatProvider):
+        self.chat = chat
 
     async def run(self, task: PlannedTask, message: IncomingMessage) -> AgentResult:
-        try:
-            async with self.sessions() as session:
-                await record_unhandled(
-                    session, message.open_id, message.message_id, message.text, task.intent.value
-                )
-        except Exception:
-            pass
+        reply = await self.chat.text(
+            system=(
+                "你是个人助手的通用对话 Agent。仅回答普通对话；不要声称已写入知识库、"
+                "灵感表或现有食材清单，也不要执行或承诺执行外部操作。"
+            ),
+            user=message.text,
+        )
         return AgentResult(
             task_id=task.id,
             intent=task.intent,
-            reply="目前我只支持知识/灵感沉淀、知识检索，以及冰箱库存和菜谱管理。这个需求已记录。",
+            reply=reply,
         )

@@ -1,5 +1,3 @@
-from datetime import date
-
 import pytest
 
 from self_evolution_agent.config import Settings
@@ -38,10 +36,6 @@ async def test_job_enqueue_is_idempotent(database: Database) -> None:
 async def test_inventory_lifecycle(database: Database) -> None:
     prediction = IngredientPrediction(
         name="牛奶",
-        quantity=1,
-        unit="盒",
-        expiry_date=date.today(),
-        date_source="printed",
         confidence=0.98,
     )
     async with database.sessions() as session:
@@ -49,6 +43,23 @@ async def test_inventory_lifecycle(database: Database) -> None:
         item = await repository.create_from_prediction(
             owner_id="user", prediction=prediction, image_key="img", model_version="v1"
         )
-        assert (await repository.list_expiring("user"))[0].id == item.id
+        assert (await repository.list_active("user"))[0].id == item.id
         await repository.consume(item)
         assert await repository.list_active("user") == []
+
+
+async def test_duplicate_active_ingredient_is_merged(database: Database) -> None:
+    prediction = IngredientPrediction(name="西红柿", normalized_name="番茄", confidence=0.9)
+    async with database.sessions() as session:
+        repository = InventoryRepository(session)
+        first = await repository.create_from_prediction(
+            owner_id="user", prediction=prediction, image_key="img-1", model_version="v1"
+        )
+        second = await repository.create_from_prediction(
+            owner_id="user", prediction=prediction, image_key="img-2", model_version="v2"
+        )
+        items = await repository.list_active("user")
+    assert first.id == second.id
+    assert len(items) == 1
+    assert items[0].image_key == "img-2"
+    assert items[0].model_version == "v2"

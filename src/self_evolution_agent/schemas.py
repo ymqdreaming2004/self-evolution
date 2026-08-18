@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -15,13 +15,13 @@ class Intent(StrEnum):
     FRIDGE_QUERY = "fridge_query"
     FRIDGE_MUTATE = "fridge_mutate"
     RECIPE = "recipe"
-    PLACEHOLDER = "placeholder"
+    GENERAL_CHAT = "general_chat"
 
 
 class TaskKind(StrEnum):
     INSPIRATION = "inspiration"
     FRIDGE = "fridge"
-    PLACEHOLDER = "placeholder"
+    GENERAL = "general"
 
 
 class PlannedTask(BaseModel):
@@ -61,30 +61,23 @@ class IncomingMessage(BaseModel):
 class IngredientPrediction(BaseModel):
     name: str
     normalized_name: str | None = None
-    quantity: float = Field(default=1, gt=0)
-    unit: str = "件"
-    production_date: date | None = None
-    shelf_life_days: int | None = Field(default=None, gt=0)
-    expiry_date: date | None = None
-    date_source: Literal["printed", "calculated", "unknown"] = "unknown"
     confidence: float = Field(ge=0, le=1)
-    evidence_text: str = ""
 
     @model_validator(mode="after")
-    def derive_expiry_date(self) -> IngredientPrediction:
-        if self.expiry_date is None and self.production_date and self.shelf_life_days:
-            from datetime import timedelta
-
-            self.expiry_date = self.production_date + timedelta(days=self.shelf_life_days)
-            self.date_source = "calculated"
+    def normalize_name(self) -> IngredientPrediction:
+        self.name = self.name.strip()
+        if not self.name:
+            raise ValueError("ingredient name must not be empty")
         if not self.normalized_name:
             self.normalized_name = self.name.strip().lower()
+        else:
+            self.normalized_name = self.normalized_name.strip().lower()
         return self
 
 
 class VisionResult(BaseModel):
     items: list[IngredientPrediction]
-    model_version: str
+    model_version: str = ""
     raw_text: str = ""
 
 
@@ -102,6 +95,7 @@ class KnowledgeHit(BaseModel):
     content: str
     title: str
     source: str
+    note_link: str = ""
     created_at: datetime
     score: float | None = None
 
@@ -128,13 +122,15 @@ class JobPayload(BaseModel):
     data: dict[str, Any]
 
 
-class RecipeResult(BaseModel):
+class RecipeSuggestion(BaseModel):
     title: str
-    servings: int = 1
     inventory_ingredients: list[str]
     extra_ingredients: list[str] = Field(default_factory=list)
     steps: list[str]
-    notes: str = ""
+
+
+class RecipeResult(BaseModel):
+    recipes: list[RecipeSuggestion] = Field(min_length=1, max_length=5)
 
 
 class AgentEffect(BaseModel):
@@ -166,6 +162,5 @@ class ContentMetadata(BaseModel):
 
 
 class InventoryMutation(BaseModel):
-    action: Literal["update", "consume", "delete"]
-    item_id: str
-    values: dict[str, Any] = Field(default_factory=dict)
+    action: Literal["consume"] = "consume"
+    item_name: str

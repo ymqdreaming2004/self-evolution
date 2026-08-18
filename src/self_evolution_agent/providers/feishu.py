@@ -107,10 +107,16 @@ class FeishuClient:
                 "content": json.dumps(content, ensure_ascii=False),
             },
         )
-        response.raise_for_status()
-        data = response.json()
-        if data.get("code", 0) != 0:
-            raise RuntimeError(f"Feishu message failed: {data}")
+        try:
+            data = response.json()
+        except ValueError:
+            data = {"raw": response.text[:1000]}
+        if response.is_error or data.get("code", 0) != 0:
+            raise RuntimeError(
+                "Feishu message send failed: "
+                f"http_status={response.status_code}, code={data.get('code')}, "
+                f"message={data.get('msg') or data.get('message') or data.get('raw')}"
+            )
         return data.get("data", {})
 
     async def append_idea(self, idea: BitableIdea) -> dict[str, Any]:
@@ -162,73 +168,69 @@ def fridge_confirmation_card(
 ) -> dict[str, Any]:
     lines = []
     form_elements: list[dict[str, Any]] = []
-    missing_date = False
     for index, item in enumerate(result.items, start=1):
-        expiry = item.expiry_date.isoformat() if item.expiry_date else "未知（确认前请补全）"
-        missing_date = missing_date or item.expiry_date is None
-        lines.append(
-            f"{index}. **{item.name}** {item.quantity:g}{item.unit}，到期日：{expiry}，"
-            f"置信度：{item.confidence:.0%}"
+        lines.append(f"{index}. **{item.name}** · 置信度 {item.confidence:.0%}")
+        form_elements.append(
+            {
+                "tag": "input",
+                "name": f"name_{index - 1}",
+                "default_value": item.name,
+                "placeholder": {
+                    "tag": "plain_text",
+                    "content": "食材名称；留空表示不加入",
+                },
+            }
         )
-        form_elements.extend(
-            [
-                {
-                    "tag": "input",
-                    "name": f"name_{index - 1}",
-                    "default_value": item.name,
-                    "placeholder": {"tag": "plain_text", "content": "食材名称"},
-                },
-                {
-                    "tag": "input",
-                    "name": f"quantity_{index - 1}",
-                    "default_value": f"{item.quantity:g}",
-                    "placeholder": {"tag": "plain_text", "content": "数量"},
-                },
-                {
-                    "tag": "input",
-                    "name": f"expiry_{index - 1}",
-                    "default_value": item.expiry_date.isoformat() if item.expiry_date else "",
-                    "placeholder": {
-                        "tag": "plain_text",
-                        "content": "到期日 YYYY-MM-DD，未知填 unknown",
-                    },
-                },
-            ]
-        )
-    warning = "\n\n日期缺失的条目必须编辑补全，或明确保留为未知。" if missing_date else ""
     value = {"action_id": action_id, "thread_id": thread_id, "draft_id": draft_id}
     return {
-        "config": {"wide_screen_mode": True},
-        "header": {"template": "orange", "title": {"tag": "plain_text", "content": "确认食材录入"}},
-        "elements": [
-            {"tag": "markdown", "content": "\n".join(lines) + warning},
-            {
-                "tag": "form",
-                "name": "fridge_confirmation",
-                "elements": [
-                    *form_elements,
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "确认入库"},
-                        "type": "primary",
-                        "value": {**value, "action": "confirm"},
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "取消"},
-                        "value": {**value, "action": "cancel"},
-                    },
-                ],
-            },
-        ],
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "default"},
+        "header": {
+            "template": "orange",
+            "title": {"tag": "plain_text", "content": "确认食材录入"},
+        },
+        "body": {
+            "direction": "vertical",
+            "padding": "12px 12px 20px 12px",
+            "vertical_spacing": "12px",
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": "\n".join(lines) + "\n\n可修改名称；识别错误的条目请清空名称。",
+                },
+                {
+                    "tag": "form",
+                    "name": "fridge_confirmation",
+                    "vertical_spacing": "8px",
+                    "elements": [
+                        *form_elements,
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "确认入库"},
+                            "type": "primary_filled",
+                            "width": "fill",
+                            "form_action_type": "submit",
+                            "name": "confirm_inventory",
+                            "value": {**value, "action": "confirm"},
+                        },
+                    ],
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "取消"},
+                    "type": "default",
+                    "width": "fill",
+                    "behaviors": [
+                        {"type": "callback", "value": {**value, "action": "cancel"}}
+                    ],
+                },
+            ],
+        },
     }
 
 
-def inventory_card(items: list[Any], title: str = "冰箱库存") -> dict[str, Any]:
-    rows = []
-    for item in items:
-        expiry = item.expiry_date.isoformat() if item.expiry_date else "未知"
-        rows.append(f"- **{item.name}** {item.quantity:g}{item.unit} · 到期 {expiry} · `{item.id}`")
+def inventory_card(items: list[Any], title: str = "现有食材") -> dict[str, Any]:
+    rows = [f"- **{item.name}**" for item in items]
     return {
         "config": {"wide_screen_mode": True},
         "header": {"template": "blue", "title": {"tag": "plain_text", "content": title}},
